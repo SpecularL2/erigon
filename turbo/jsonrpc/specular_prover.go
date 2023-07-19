@@ -132,9 +132,9 @@ func (api *PrivateDebugAPIImpl) computeTxEnvForProof(ctx context.Context, engine
 		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
 	}
 	//stagedsync.UnwindIntermediateHashesStage()
-	stageState := &stagedsync.StageState{BlockNumber: -latestBlock} // some random number
+	stageState := &stagedsync.StageState{BlockNumber: latestBlock}
 
-	var lgr log.Logger = nil // TODO: replace nil with logger
+	var lgr log.Logger = api.logger
 	hashStageCfg := stagedsync.StageHashStateCfg(nil, api.dirs, api.historyV3(batch))
 	if err := stagedsync.UnwindHashStateStage(unwindState, stageState, batch, hashStageCfg, ctx, lgr); err != nil {
 		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err

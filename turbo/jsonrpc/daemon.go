@@ -25,7 +25,7 @@ func APIList(db kv.RoDB, borDb kv.RoDB, eth rpchelper.ApiBackend, txPool txpool.
 	erigonImpl := NewErigonAPI(base, db, eth)
 	txpoolImpl := NewTxPoolAPI(base, db, txPool)
 	netImpl := NewNetAPIImpl(eth)
-	debugImpl := NewPrivateDebugAPI(base, db, cfg.Gascap)
+	debugImpl := NewPrivateDebugAPI(base, db, cfg.Gascap, logger)
 	traceImpl := NewTraceAPI(base, db, &cfg)
 	web3Impl := NewWeb3APIImpl(eth)
 	dbImpl := NewDBAPIImpl() /* deprecated */

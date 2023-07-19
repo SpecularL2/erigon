@@ -200,6 +200,7 @@ func ProveTx(
 		callmsg := prepareCallMessage(message)
 		result, err = statefull.ApplyBorMessage(*vmenv, callmsg)
 	} else {
+		fmt.Printf("apply message, message: %v vmenv: %v, refunds: %v\n", message, vmenv, refunds)
 		result, err = core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.Gas()).AddDataGas(message.DataGas()), refunds, false /* gasBailout */)
 	}
 
