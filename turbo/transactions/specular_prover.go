@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ledgerwatch/erigon/core/systemcontracts"
 	"time"
 
 	jsoniter "github.com/json-iterator/go"
@@ -22,23 +23,35 @@ import (
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
 	"github.com/ledgerwatch/erigon/eth/tracers"
 	"github.com/ledgerwatch/erigon/eth/tracers/logger"
-	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/turbo/services"
 )
 
 // ComputeTxEnv returns the execution environment of a certain transaction.
 // TODO: use PlainStateWriter instead of PlainState
-func ComputeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, block *types.Block, cfg *chain.Config, headerReader services.HeaderReader, dbtx kv.Tx, txIndex int, historyV3 bool) (core.Message, evmtypes.BlockContext, evmtypes.TxContext, *state.IntraBlockState, state.StateReader, error) {
-	reader, err := rpchelper.CreateHistoryStateReader(dbtx, block.NumberU64(), txIndex, historyV3, cfg.ChainName)
-	if err != nil {
-		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
-	}
+func ComputeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, block *types.Block, cfg *chain.Config, headerReader services.HeaderReader, dbtx kv.Tx, txIndex int, db kv.RoDB) (core.Message, evmtypes.BlockContext, evmtypes.TxContext, *state.IntraBlockState, state.StateReader, error) {
+	fmt.Printf("LOG: dbtx type: %T\n", dbtx) // type *mdbx.MdbxTx
 
-	// Create the parent state database
+	//reader, err := rpchelper.CreateHistoryStateReader(dbtx, block.NumberU64(), txIndex, false, cfg.ChainName)
+	reader := state.NewPlainState(dbtx, block.NumberU64(), systemcontracts.SystemContractCodeLookup[cfg.ChainName]) // a simplified version of above
 	statedb := state.New(reader)
 
+	tx2, _ := db.BeginRo(ctx)
+	var stateReader state.StateReader = state.NewPlainStateReader(tx2)
+	statedb2 := state.New(stateReader)
+
+	stateReader2 := state.NewPlainStateReader(dbtx)
+	statedb3 := state.New(stateReader2)
+
+	//if err != nil {
+	//	return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
+	//}
+
+	fmt.Printf("reader nonce: %d\n", statedb.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))        // returns 4
+	fmt.Printf("stateReader nonce: %d\n", statedb2.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))  // returns 5
+	fmt.Printf("stateReader2 nonce: %d\n", statedb3.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7"))) // returns 5
+
 	if txIndex == 0 && len(block.Transactions()) == 0 {
-		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, statedb, reader, nil
+		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, statedb, stateReader, nil
 	}
 	getHeader := func(hash libcommon.Hash, n uint64) *types.Header {
 		h, _ := headerReader.HeaderByNumber(ctx, dbtx, n)
@@ -50,21 +63,7 @@ func ComputeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, bl
 
 	// Recompute transactions up to the target index.
 	signer := types.MakeSigner(cfg, block.NumberU64(), block.Time())
-	if historyV3 {
-		rules := cfg.Rules(blockContext.BlockNumber, blockContext.Time)
-		txn := block.Transactions()[txIndex]
-		statedb.SetTxContext(txn.Hash(), block.Hash(), txIndex)
-		msg, _ := txn.AsMessage(*signer, block.BaseFee(), rules)
-		if msg.FeeCap().IsZero() && engine != nil {
-			syscall := func(contract libcommon.Address, data []byte) ([]byte, error) {
-				return core.SysCallContract(contract, data, cfg, statedb, header, engine, true /* constCall */)
-			}
-			msg.SetIsFree(engine.IsServiceTransaction(msg.From(), syscall))
-		}
 
-		TxContext := core.NewEVMTxContext(msg)
-		return msg, blockContext, TxContext, statedb, reader, nil
-	}
 	vmenv := vm.NewEVM(blockContext, evmtypes.TxContext{}, statedb, cfg, vm.Config{})
 	rules := vmenv.ChainRules()
 
@@ -73,6 +72,8 @@ func ComputeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, bl
 	core.InitializeBlockExecution(engine.(consensus.Engine), consensusHeaderReader, header, block.Transactions(), block.Uncles(), cfg, statedb)
 
 	for idx, txn := range block.Transactions() {
+		fmt.Printf("Flag 3, %d\n", idx)
+		fmt.Printf("nonce 1: %d\n", statedb.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))
 		select {
 		default:
 		case <-ctx.Done():
@@ -91,7 +92,7 @@ func ComputeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, bl
 
 		TxContext := core.NewEVMTxContext(msg)
 		if idx == txIndex {
-			return msg, blockContext, TxContext, statedb, reader, nil
+			return msg, blockContext, TxContext, statedb, stateReader, nil
 		}
 		vmenv.Reset(TxContext, statedb)
 		// Not yet the searched for transaction, execute on top of the current state
@@ -100,13 +101,15 @@ func ComputeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, bl
 		}
 		// Ensure any modifications are committed to the state
 		// Only delete empty objects if EIP161 (part of Spurious Dragon) is in effect
-		_ = statedb.FinalizeTx(rules, reader.(*state.PlainState))
+		_ = statedb.FinalizeTx(rules, stateReader.(*state.PlainState))
+		fmt.Printf("nonce 2: %d\n", statedb.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))
 
 		if idx+1 == len(block.Transactions()) {
 			// Return the state from evaluating all txs in the block, note no msg or TxContext in this case
-			return nil, blockContext, evmtypes.TxContext{}, statedb, reader, nil
+			return nil, blockContext, evmtypes.TxContext{}, statedb, stateReader, nil
 		}
 	}
+	fmt.Printf("Flag 4\n")
 	return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, fmt.Errorf("transaction index %d out of range for block %x", txIndex, block.Hash())
 }
 

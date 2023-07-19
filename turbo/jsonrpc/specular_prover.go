@@ -90,11 +90,13 @@ func (api *PrivateDebugAPIImpl) GenerateProofForTest(ctx context.Context, hash c
 	}
 	engine := api.engine()
 
-	msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), api.historyV3(tx))
+	fmt.Printf("TEST: api.historyV3: %v\n", api.historyV3(tx))
+	//msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), false)
+	msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnvForProof(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), api.db)
 	if err != nil {
 		stream.WriteNil()
 		return err
 	}
 	// Trace the transaction and return
-	return transactions.TraceTx(ctx, msg, blockCtx, txCtx, ibs, config, chainConfig, stream, api.evmCallTimeout)
+	return transactions.ProveTx(ctx, msg, blockCtx, txCtx, ibs, config, chainConfig, stream, api.evmCallTimeout)
 }

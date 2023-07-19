@@ -57,6 +57,8 @@ func ComputeTxEnv(ctx context.Context, engine consensus.EngineReader, block *typ
 	header := block.HeaderNoCopy()
 
 	blockContext := core.NewEVMBlockContext(header, core.GetHashFn(header, getHeader), engine, nil)
+	fmt.Printf("Flag 1\n")
+	fmt.Printf("nonce: %d\n", statedb.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))
 
 	// Recompute transactions up to the target index.
 	signer := types.MakeSigner(cfg, block.NumberU64(), block.Time())
@@ -81,8 +83,11 @@ func ComputeTxEnv(ctx context.Context, engine consensus.EngineReader, block *typ
 	consensusHeaderReader := stagedsync.NewChainReaderImpl(cfg, dbtx, nil)
 
 	core.InitializeBlockExecution(engine.(consensus.Engine), consensusHeaderReader, header, block.Transactions(), block.Uncles(), cfg, statedb)
+	fmt.Printf("Flag 2\n")
 
 	for idx, txn := range block.Transactions() {
+		fmt.Printf("Flag 3, %d\n", idx)
+		fmt.Printf("nonce 1: %d\n", statedb.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))
 		select {
 		default:
 		case <-ctx.Done():
@@ -111,12 +116,14 @@ func ComputeTxEnv(ctx context.Context, engine consensus.EngineReader, block *typ
 		// Ensure any modifications are committed to the state
 		// Only delete empty objects if EIP161 (part of Spurious Dragon) is in effect
 		_ = statedb.FinalizeTx(rules, reader.(*state.PlainState))
+		fmt.Printf("nonce 2: %d\n", statedb.GetNonce(libcommon.HexToAddress("0x0546341B6Aa44e4EA02F91c340F871E34A1A94E7")))
 
 		if idx+1 == len(block.Transactions()) {
 			// Return the state from evaluating all txs in the block, note no msg or TxContext in this case
 			return nil, blockContext, evmtypes.TxContext{}, statedb, reader, nil
 		}
 	}
+	fmt.Printf("Flag 4\n")
 	return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, fmt.Errorf("transaction index %d out of range for block %x", txIndex, block.Hash())
 }
 
