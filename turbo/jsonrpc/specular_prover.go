@@ -3,9 +3,9 @@ package jsonrpc
 import (
 	"context"
 	"fmt"
+
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/memdb"
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/core"
@@ -13,11 +13,8 @@ import (
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/core/vm/evmtypes"
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
-	"github.com/ledgerwatch/erigon/rpc"
 	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/turbo/services"
-	"github.com/ledgerwatch/erigon/turbo/trie"
-	"github.com/ledgerwatch/log/v3"
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/ledgerwatch/erigon-lib/common"
@@ -29,6 +26,7 @@ import (
 
 // TODO: implement https://github.com/SpecularL2/specular/blob/08d42a39a0cdbae89fe9064f2916888b927705aa/clients/geth/specular/prover/test_api.go#L31
 func (api *PrivateDebugAPIImpl) GenerateProofForTest(ctx context.Context, hash common.Hash, config *tracers.TraceConfig, stream *jsoniter.Stream) error {
+	fmt.Println("GenerateProofForTest")
 	tx, err := api.db.BeginRo(ctx)
 	if err != nil {
 		stream.WriteNil()
@@ -105,8 +103,11 @@ func (api *PrivateDebugAPIImpl) GenerateProofForTest(ctx context.Context, hash c
 	}
 	engine := api.engine()
 
+	batch := memdb.NewMemoryBatch(tx, "temp")
+	defer batch.Rollback()
+
 	//msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), false)
-	msg, blockCtx, txCtx, ibs, _, err := api.computeTxEnvForProof(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), false)
+	msg, blockCtx, txCtx, ibs, _, err := api.computeTxEnvForProof(ctx, engine, block, chainConfig, api._blockReader, batch, int(txnIndex), false)
 	if err != nil {
 		stream.WriteNil()
 		return err
@@ -117,42 +118,34 @@ func (api *PrivateDebugAPIImpl) GenerateProofForTest(ctx context.Context, hash c
 
 // ComputeTxEnv returns the execution environment of a certain transaction.
 // TODO: use PlainStateWriter instead of PlainState
-func (api *PrivateDebugAPIImpl) computeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, block *types.Block, cfg *chain.Config, headerReader services.HeaderReader, dbtx kv.Tx, txIndex int, historyV3 bool) (core.Message, evmtypes.BlockContext, evmtypes.TxContext, *state.IntraBlockState, state.StateReader, error) {
-	//reader, err := rpchelper.CreateHistoryStateReader(dbtx, block.NumberU64(), txIndex, historyV3, cfg.ChainName)
-
-	batch := memdb.NewMemoryBatch(dbtx, "temp")
-	defer batch.Rollback()
-
-	rl := trie.NewRetainList(0)
-
-	unwindState := &stagedsync.UnwindState{UnwindPoint: block.Header().Number.Uint64()}
-
-	latestBlock, err := rpchelper.GetLatestBlockNumber(dbtx)
+func (api *PrivateDebugAPIImpl) computeTxEnvForProof(ctx context.Context, engine consensus.EngineReader, block *types.Block, cfg *chain.Config, headerReader services.HeaderReader, tx *memdb.MemoryMutation, txIndex int, historyV3 bool) (core.Message, evmtypes.BlockContext, evmtypes.TxContext, *state.IntraBlockState, state.StateReader, error) {
+	latestBlock, err := rpchelper.GetLatestBlockNumber(tx)
 	if err != nil {
 		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
 	}
-	//stagedsync.UnwindIntermediateHashesStage()
+
+	unwindState := &stagedsync.UnwindState{UnwindPoint: block.Header().Number.Uint64() - 1}
 	stageState := &stagedsync.StageState{BlockNumber: latestBlock}
 
-	var lgr log.Logger = api.logger
-	hashStageCfg := stagedsync.StageHashStateCfg(nil, api.dirs, api.historyV3(batch))
-	if err := stagedsync.UnwindHashStateStage(unwindState, stageState, batch, hashStageCfg, ctx, lgr); err != nil {
+	hashStageCfg := stagedsync.StageHashStateCfg(nil, api.dirs, api.historyV3(tx))
+	if err = stagedsync.UnwindHashStateStage(unwindState, stageState, tx, hashStageCfg, ctx, api.logger); err != nil {
 		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
 	}
 
-	interHashStageCfg := stagedsync.StageTrieCfg(nil, false, false, false, api.dirs.Tmp, api._blockReader, nil, api.historyV3(batch), api._agg)
-	_, err = stagedsync.UnwindIntermediateHashesForTrieLoader("eth_getProof", rl, unwindState, stageState, batch, interHashStageCfg, nil, nil, ctx.Done(), lgr)
+	interHashStageCfg := stagedsync.StageTrieCfg(nil, false, false, false, api.dirs.Tmp, api._blockReader, nil, api.historyV3(tx), api._agg)
+	err = stagedsync.UnwindIntermediateHashesStage(unwindState, stageState, tx, interHashStageCfg, ctx, api.logger)
 	if err != nil {
 		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
 	}
-	tx := batch
 
-	blockNumber := rpc.BlockNumber(block.Header().Number.Int64())
-	blockNumberOrHash := rpc.BlockNumberOrHash{
-		BlockNumber: &blockNumber,
+	execCfg := stagedsync.ExecuteBlockCfg{}
+	err = stagedsync.UnwindExecutionStage(unwindState, stageState, tx, ctx, execCfg, false, api.logger)
+	if err != nil {
+		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, err
 	}
 
-	reader, err := rpchelper.CreateStateReader(ctx, tx, blockNumberOrHash, 0, api.filters, api.stateCache, api.historyV3(tx), "")
+	reader := state.NewPlainStateReader(tx)
+	writer := state.NewPlainStateWriterNoHistory(tx)
 
 	// Create the parent state database
 	statedb := state.New(reader)
@@ -161,7 +154,7 @@ func (api *PrivateDebugAPIImpl) computeTxEnvForProof(ctx context.Context, engine
 		return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, statedb, reader, nil
 	}
 	getHeader := func(hash libcommon.Hash, n uint64) *types.Header {
-		h, _ := headerReader.HeaderByNumber(ctx, dbtx, n)
+		h, _ := headerReader.HeaderByNumber(ctx, tx, n)
 		return h
 	}
 	header := block.HeaderNoCopy()
@@ -188,7 +181,7 @@ func (api *PrivateDebugAPIImpl) computeTxEnvForProof(ctx context.Context, engine
 	vmenv := vm.NewEVM(blockContext, evmtypes.TxContext{}, statedb, cfg, vm.Config{})
 	rules := vmenv.ChainRules()
 
-	consensusHeaderReader := stagedsync.NewChainReaderImpl(cfg, dbtx, nil)
+	consensusHeaderReader := stagedsync.NewChainReaderImpl(cfg, tx, nil)
 
 	core.InitializeBlockExecution(engine.(consensus.Engine), consensusHeaderReader, header, block.Transactions(), block.Uncles(), cfg, statedb)
 
@@ -220,7 +213,7 @@ func (api *PrivateDebugAPIImpl) computeTxEnvForProof(ctx context.Context, engine
 		}
 		// Ensure any modifications are committed to the state
 		// Only delete empty objects if EIP161 (part of Spurious Dragon) is in effect
-		_ = statedb.FinalizeTx(rules, reader.(*state.PlainState))
+		_ = statedb.FinalizeTx(rules, writer)
 
 		if idx+1 == len(block.Transactions()) {
 			// Return the state from evaluating all txs in the block, note no msg or TxContext in this case

@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"fmt"
+
 	"github.com/ledgerwatch/log/v3"
 
 	jsoniter "github.com/json-iterator/go"
@@ -53,12 +54,12 @@ type PrivateDebugAPIImpl struct {
 }
 
 // NewPrivateDebugAPI returns PrivateDebugAPIImpl instance
-func NewPrivateDebugAPI(base *BaseAPI, db kv.RoDB, gascap uint64, logger log.Logger) *PrivateDebugAPIImpl {
+func NewPrivateDebugAPI(base *BaseAPI, db kv.RoDB, gascap uint64) *PrivateDebugAPIImpl {
 	return &PrivateDebugAPIImpl{
 		BaseAPI: base,
 		db:      db,
 		GasCap:  gascap,
-		logger:  logger,
+		logger:  log.New(),
 	}
 }
 
