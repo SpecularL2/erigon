@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	"github.com/holiman/uint256"
+	"github.com/specularl2/specular/clients/geth/specular/rollup/utils/log"
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
@@ -153,6 +154,10 @@ func (sdb *IntraBlockState) AddLog(log2 *types.Log) {
 
 func (sdb *IntraBlockState) GetLogs(hash libcommon.Hash) []*types.Log {
 	return sdb.logs[hash]
+}
+
+func (sdb *IntraBlockState) GetCurrentLogs() []*types.Log {
+	return sdb.logs[sdb.thash]
 }
 
 func (sdb *IntraBlockState) Logs() []*types.Log {
@@ -830,4 +835,158 @@ func (sdb *IntraBlockState) AddressInAccessList(addr libcommon.Address) bool {
 // SlotInAccessList returns true if the given (address, slot)-tuple is in the access list.
 func (sdb *IntraBlockState) SlotInAccessList(addr libcommon.Address, slot libcommon.Hash) (addressPresent bool, slotPresent bool) {
 	return sdb.accessList.Contains(addr, slot)
+}
+
+// Specular ---
+
+func (so *stateObject) Copy(sdb *IntraBlockState) *stateObject {
+	s := newObject(sdb, so.address, &so.data, &so.original)
+	s.code = so.code
+	s.originStorage = so.originStorage.Copy()
+	s.blockOriginStorage = so.blockOriginStorage.Copy()
+	s.dirtyStorage = so.dirtyStorage.Copy()
+	s.fakeStorage = so.fakeStorage.Copy()
+	s.dirtyCode = so.dirtyCode
+	s.selfdestructed = so.selfdestructed
+	s.deleted = so.deleted
+	s.created = so.created
+	return s
+}
+
+func (sdb *IntraBlockState) Copy(reader StateReader) *IntraBlockState {
+	state := &IntraBlockState{
+		stateReader:       reader,
+		stateObjects:      make(map[libcommon.Address]*stateObject),
+		stateObjectsDirty: make(map[libcommon.Address]struct{}),
+		nilAccounts:       make(map[libcommon.Address]struct{}),
+		savedErr:          sdb.savedErr,
+		refund:            sdb.refund,
+		thash:             sdb.thash,
+		bhash:             sdb.bhash,
+		txIndex:           sdb.txIndex,
+		logs:              make(map[libcommon.Hash][]*types.Log, len(sdb.logs)),
+		logSize:           sdb.logSize,
+		accessList:        sdb.accessList.Copy(),
+		transientStorage:  newTransientStorage(),
+		journal:           newJournal(),
+		trace:             sdb.trace,
+		balanceInc:        make(map[libcommon.Address]*BalanceIncrease),
+	}
+	for addr := range sdb.journal.dirties {
+		if obj, exist := sdb.stateObjects[addr]; exist {
+			state.stateObjects[addr] = obj.Copy(state)
+			state.stateObjectsDirty[addr] = struct{}{}
+		}
+	}
+	for addr := range sdb.stateObjectsDirty {
+		if _, exist := state.stateObjects[addr]; !exist {
+			state.stateObjects[addr] = sdb.stateObjects[addr].Copy(state)
+		}
+		state.stateObjectsDirty[addr] = struct{}{}
+	}
+	for addr := range sdb.nilAccounts {
+		state.nilAccounts[addr] = struct{}{}
+	}
+	for hash, logs := range sdb.logs {
+		cpy := make([]*types.Log, len(logs))
+		for i, l := range logs {
+			cpy[i] = new(types.Log)
+			*cpy[i] = *l
+		}
+		state.logs[hash] = cpy
+	}
+	for addr, st := range sdb.transientStorage {
+		state.transientStorage[addr] = st.Copy()
+	}
+	for addr, bi := range sdb.balanceInc {
+		state.balanceInc[addr] = &BalanceIncrease{
+			increase:    bi.increase,
+			count:       bi.count,
+			transferred: bi.transferred,
+		}
+	}
+	return state
+}
+
+// CommitBlockForProof finalizes the state by removing the self destructed objects
+// and clears the journal as well as the refunds.
+func (sdb *IntraBlockState) CommitForProof(chainRules *chain.Rules, stateWriter StateWriter) {
+	for addr, bi := range sdb.balanceInc {
+		if !bi.transferred {
+			sdb.getStateObject(addr)
+		}
+	}
+
+	for addr := range sdb.journal.dirties {
+		so, exist := sdb.stateObjects[addr]
+		if !exist {
+			// ripeMD is 'touched' at block 1714175, in tx 0x1237f737031e40bcde4a8b7e717b2d15e3ecadfe49bb1bbc71ee9deb09c6fcf2
+			// That tx goes out of gas, and although the notion of 'touched' does not exist there, the
+			// touch-event will still be recorded in the journal. Since ripeMD is a special snowflake,
+			// it will persist in the journal even though the journal is reverted. In this special circumstance,
+			// it may exist in `sdb.journal.dirties` but not in `sdb.stateObjects`.
+			// Thus, we can safely ignore it here
+			continue
+		}
+
+		if err := updateAccountForCommitForProof(chainRules.IsSpuriousDragon, chainRules.IsAura, stateWriter, addr, so, true); err != nil {
+			panic(err)
+		}
+
+		sdb.stateObjectsDirty[addr] = struct{}{}
+	}
+
+	for addr, stateObject := range sdb.stateObjects {
+		if _, exist := sdb.journal.dirties[addr]; exist {
+			continue
+		}
+		_, isDirty := sdb.stateObjectsDirty[addr]
+		if err := updateAccountForCommitForProof(chainRules.IsSpuriousDragon, chainRules.IsAura, stateWriter, addr, stateObject, isDirty); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (sdb *IntraBlockState) DeleteSuicidedAccountForProof(addr libcommon.Address, stateWriter StateWriter) {
+	obj, exist := sdb.stateObjects[addr]
+	if !exist {
+		log.Warn("delete unexisted account", "addr", addr)
+		return
+	}
+	obj.deleted = true
+
+	if err := stateWriter.DeleteAccount(addr, &obj.original); err != nil {
+		panic(err)
+	}
+}
+
+func updateAccountForCommitForProof(EIP161Enabled bool, isAura bool, stateWriter StateWriter, addr libcommon.Address, stateObject *stateObject, isDirty bool) error {
+	emptyRemoval := EIP161Enabled && stateObject.empty() && (!isAura || addr != SystemAddress)
+	if isDirty && emptyRemoval { // rollup-specific: we ignore suicided accounts here
+		if err := stateWriter.DeleteAccount(addr, &stateObject.original); err != nil {
+			return err
+		}
+		stateObject.deleted = true
+	}
+	if isDirty && (stateObject.created || !stateObject.selfdestructed) && !emptyRemoval {
+		stateObject.deleted = false
+		// Write any contract code associated with the state object
+		if stateObject.code != nil && stateObject.dirtyCode {
+			if err := stateWriter.UpdateAccountCode(addr, stateObject.data.Incarnation, stateObject.data.CodeHash, stateObject.code); err != nil {
+				return err
+			}
+		}
+		if stateObject.created {
+			if err := stateWriter.CreateContract(addr); err != nil {
+				return err
+			}
+		}
+		if err := stateObject.updateTrie(stateWriter); err != nil {
+			return err
+		}
+		if err := stateWriter.UpdateAccountData(addr, &stateObject.original, &stateObject.data); err != nil {
+			return err
+		}
+	}
+	return nil
 }

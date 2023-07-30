@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ledgerwatch/log/v3"
+
 	jsoniter "github.com/json-iterator/go"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
@@ -48,6 +50,7 @@ type PrivateDebugAPIImpl struct {
 	*BaseAPI
 	db     kv.RoDB
 	GasCap uint64
+	logger log.Logger
 }
 
 // NewPrivateDebugAPI returns PrivateDebugAPIImpl instance
@@ -56,6 +59,7 @@ func NewPrivateDebugAPI(base *BaseAPI, db kv.RoDB, gascap uint64) *PrivateDebugA
 		BaseAPI: base,
 		db:      db,
 		GasCap:  gascap,
+		logger:  log.New(),
 	}
 }
 
