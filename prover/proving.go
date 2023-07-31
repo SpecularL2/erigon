@@ -88,7 +88,6 @@ import (
 // TraceTx configures a new tracer according to the provided configuration, and
 // executes the given message in the provided environment. The return value will
 // be tracer dependent.
-// TODO: inject prover
 func GenerateProofForTest(
 	ctx context.Context,
 	message core.Message,
@@ -166,7 +165,95 @@ func GenerateProofForTest(
 	}
 
 	// var result *core.ExecutionResult
-	fmt.Printf("apply message, message: %v vmenv: %v, refunds: %v\n", message, vmenv, refunds)
+	_, err = core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.Gas()).AddDataGas(message.DataGas()), refunds, false /* gasBailout */)
+
+	if err != nil {
+		stream.WriteNil()
+		return fmt.Errorf("tracing failed: %w", err)
+	}
+	if r, err1 := tracer.GetResult(); err1 == nil {
+		stream.Write(r)
+	} else {
+		return err1
+	}
+	return nil
+}
+
+func GenerateProofForBench(
+	ctx context.Context,
+	message core.Message,
+	blockCtx evmtypes.BlockContext,
+	txCtx evmtypes.TxContext,
+	ibs *state.IntraBlockState,
+	transactions types.Transactions,
+	receipts types.Receipts,
+	rules *chain.Rules,
+	blockNumber uint64,
+	transactionIdx uint64,
+	cumulativeGasUsed *big.Int,
+	blockGasUsed *big.Int,
+	dbtx kv.Tx,
+	reader state.StateReader,
+	writer state.StateWriter,
+	config *tracers.TraceConfig,
+	chainConfig *chain.Config,
+	stream *jsoniter.Stream,
+	callTimeout time.Duration,
+) error {
+	globalStateWrapper := NewErigonGlobalStateWrapper(rules, ibs, dbtx, reader, writer)
+	blockHashTree, err := oss.BlockHashTreeFromBlockContext(&ErigonBlockContextWrapper{&blockCtx})
+	if err != nil {
+		return err
+	}
+
+	gethTransactions := make([]prover_types.Transaction, len(transactions))
+	for i, transaction := range transactions {
+		gethTransactions[i] = toGethTransaction(transaction)
+	}
+	gethReceipts := make([]*gethtypes.Receipt, len(receipts))
+	for i, receipt := range receipts {
+		gethReceipts[i] = toGethReceipt(receipt)
+	}
+	its := oss.InterStateFromCaptured(
+		blockNumber,
+		transactionIdx,
+		globalStateWrapper,
+		cumulativeGasUsed,
+		blockGasUsed,
+		gethTransactions,
+		gethReceipts,
+		blockHashTree,
+	)
+
+	tracer, err := NewBenchProver(
+		gethTransactions[transactionIdx],
+		&txCtx,
+		gethReceipts[transactionIdx],
+		rules,
+		blockNumber,
+		transactionIdx,
+		dbtx,
+		reader,
+		writer,
+		globalStateWrapper,
+		*its,
+		blockHashTree,
+	)
+	if err != nil {
+		return err
+	}
+	// Run the transaction with tracing enabled.
+	vmenv := vm.NewEVM(blockCtx, txCtx, ibs, chainConfig, vm.Config{Debug: true, Tracer: tracer})
+	var refunds = true
+	if config != nil && config.NoRefunds != nil && *config.NoRefunds {
+		refunds = false
+	}
+
+	if config != nil && config.BorTx != nil && *config.BorTx {
+		return fmt.Errorf("bor tx not supported")
+	}
+
+	// var result *core.ExecutionResult
 	_, err = core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.Gas()).AddDataGas(message.DataGas()), refunds, false /* gasBailout */)
 
 	if err != nil {
