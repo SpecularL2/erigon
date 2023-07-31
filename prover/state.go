@@ -52,11 +52,15 @@ func (sw *ErigonGlobalStateWrapper) Copy() prover_types.L2ELClientStateInterface
 		reader: reader,
 		writer: writer,
 	}
+	// TODO: newly created batch is not rolled back, fix it
+	// TODO: the following code will crash the program
 	// runtime.SetFinalizer(s, func(s *ErigonGlobalStateWrapper) {
 	// 	// runtime.SetFinalizer(s, nil)
 	// 	// thread safe?
 	// 	s.tx.Rollback()
 	// })
+	// TODO: maybe register the created tx to the api hanlder and rollback it when the handler is closed
+	// TODO: or find out if we actually need to rollback them, feels like they may be cleaned up by GC
 	return s
 }
 
@@ -125,7 +129,6 @@ func (sw *ErigonGlobalStateWrapper) GetProof(gethAddr gethcommon.Address) ([][]b
 	for i, p := range res.AccountProof {
 		proof[i] = p
 	}
-	fmt.Println("account proof", proof)
 	return proof, nil
 }
 
@@ -162,7 +165,6 @@ func (sw *ErigonGlobalStateWrapper) GetStorageProof(gethAddr gethcommon.Address,
 	for i, p := range res.StorageProof[0].Proof {
 		proof[i] = p
 	}
-	fmt.Println("storage proof", proof)
 	return proof, nil
 }
 
@@ -201,8 +203,8 @@ func (sw *ErigonGlobalStateWrapper) GetNonce(address gethcommon.Address) uint64 
 }
 
 func (sw *ErigonGlobalStateWrapper) AddBalance(address gethcommon.Address, amount *big.Int) {
-	amount_, success := uint256.FromBig(amount)
-	if !success {
+	amount_, overflow := uint256.FromBig(amount)
+	if overflow {
 		panic("failed to convert big.Int to uint256.Int")
 	}
 	sw.ibs.AddBalance(libcommon.Address(address), amount_)

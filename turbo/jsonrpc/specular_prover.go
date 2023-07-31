@@ -25,132 +25,6 @@ import (
 	"github.com/ledgerwatch/erigon/eth/tracers"
 )
 
-// TODO: implement https://github.com/SpecularL2/specular/blob/08d42a39a0cdbae89fe9064f2916888b927705aa/clients/geth/specular/prover/test_api.go#L31
-func (api *PrivateDebugAPIImpl) GenerateProofForTest(ctx context.Context, hash common.Hash, stepIdx uint64, config *tracers.TraceConfig, stream *jsoniter.Stream) error {
-	fmt.Println("GenerateProofForTest")
-	tx, err := api.db.BeginRo(ctx)
-	if err != nil {
-		stream.WriteNil()
-		return err
-	}
-	defer tx.Rollback()
-	chainConfig, err := api.chainConfig(tx)
-	if err != nil {
-		stream.WriteNil()
-		return err
-	}
-	// Retrieve the transaction and assemble its EVM context
-	blockNum, ok, err := api.txnLookup(ctx, tx, hash)
-	if err != nil {
-		stream.WriteNil()
-		return err
-	}
-	if !ok {
-		stream.WriteNil()
-		return nil
-	}
-
-	// check pruning to ensure we have history at this block level
-	err = api.BaseAPI.checkPruneHistory(tx, blockNum)
-	if err != nil {
-		stream.WriteNil()
-		return err
-	}
-
-	// Private API returns 0 if transaction is not found.
-	if blockNum == 0 && chainConfig.Bor != nil {
-		blockNumPtr, err := rawdb.ReadBorTxLookupEntry(tx, hash)
-		if err != nil {
-			stream.WriteNil()
-			return err
-		}
-		if blockNumPtr == nil {
-			stream.WriteNil()
-			return nil
-		}
-		blockNum = *blockNumPtr
-	}
-	block, err := api.blockByNumberWithSenders(ctx, tx, blockNum)
-	if err != nil {
-		stream.WriteNil()
-		return err
-	}
-	if block == nil {
-		stream.WriteNil()
-		return nil
-	}
-	var txnIndex uint64
-	var txn types.Transaction
-	for i, transaction := range block.Transactions() {
-		if transaction.Hash() == hash {
-			txnIndex = uint64(i)
-			txn = transaction
-			break
-		}
-	}
-	if txn == nil {
-		var borTx types.Transaction
-		borTx, err = rawdb.ReadBorTransaction(tx, hash)
-		if err != nil {
-			return err
-		}
-
-		if borTx != nil {
-			stream.WriteNil()
-			return nil
-		}
-		stream.WriteNil()
-		return fmt.Errorf("transaction %#x not found", hash)
-	}
-	engine := api.engine()
-
-	receipts, err := api.getReceipts(ctx, tx, chainConfig, block, nil)
-	if err != nil {
-		stream.WriteNil()
-		return err
-	}
-
-	batch := memdb.NewMemoryBatch(tx, api.dirs.Tmp)
-	defer batch.Rollback()
-
-	fmt.Println("before")
-	fmt.Println("historyV3", api.historyV3(batch))
-
-	//msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), false)
-	msg, blockCtx, txCtx, rules, ibs, reader, writer, err := api.computeTxEnvForProof(ctx, engine, block, chainConfig, api._blockReader, batch, int(txnIndex), false)
-	if err != nil {
-		stream.WriteNil()
-		fmt.Println("error1")
-		return err
-	}
-
-	fmt.Println("wtf")
-
-	// Trace the transaction and return
-	return prover.GenerateProofForTest(
-		ctx,
-		msg,
-		blockCtx,
-		txCtx,
-		ibs,
-		block.Transactions(),
-		receipts,
-		rules,
-		blockNum,
-		txnIndex,
-		stepIdx,
-		big.NewInt(0),
-		big.NewInt(0),
-		batch,
-		reader,
-		writer,
-		config,
-		chainConfig,
-		stream,
-		api.evmCallTimeout,
-	)
-}
-
 // ComputeTxEnv returns the execution environment of a certain transaction.
 // TODO: use PlainStateWriter instead of PlainState
 func (api *PrivateDebugAPIImpl) computeTxEnvForProof(
@@ -274,4 +148,252 @@ func (api *PrivateDebugAPIImpl) computeTxEnvForProof(
 		}
 	}
 	return nil, evmtypes.BlockContext{}, evmtypes.TxContext{}, nil, nil, nil, nil, fmt.Errorf("transaction index %d out of range for block %x", txIndex, block.Hash())
+}
+
+// TODO: implement https://github.com/SpecularL2/specular/blob/08d42a39a0cdbae89fe9064f2916888b927705aa/clients/geth/specular/prover/test_api.go#L31
+func (api *PrivateDebugAPIImpl) GenerateProofForTest(ctx context.Context, hash common.Hash, stepIdx uint64, config *tracers.TraceConfig, stream *jsoniter.Stream) error {
+	tx, err := api.db.BeginRo(ctx)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	defer tx.Rollback()
+	chainConfig, err := api.chainConfig(tx)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	// Retrieve the transaction and assemble its EVM context
+	blockNum, ok, err := api.txnLookup(ctx, tx, hash)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	if !ok {
+		stream.WriteNil()
+		return nil
+	}
+
+	// check pruning to ensure we have history at this block level
+	err = api.BaseAPI.checkPruneHistory(tx, blockNum)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+
+	// Private API returns 0 if transaction is not found.
+	if blockNum == 0 && chainConfig.Bor != nil {
+		blockNumPtr, err := rawdb.ReadBorTxLookupEntry(tx, hash)
+		if err != nil {
+			stream.WriteNil()
+			return err
+		}
+		if blockNumPtr == nil {
+			stream.WriteNil()
+			return nil
+		}
+		blockNum = *blockNumPtr
+	}
+	block, err := api.blockByNumberWithSenders(ctx, tx, blockNum)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	if block == nil {
+		stream.WriteNil()
+		return nil
+	}
+	var txnIndex uint64
+	var txn types.Transaction
+	for i, transaction := range block.Transactions() {
+		if transaction.Hash() == hash {
+			txnIndex = uint64(i)
+			txn = transaction
+			break
+		}
+	}
+	if txn == nil {
+		var borTx types.Transaction
+		borTx, err = rawdb.ReadBorTransaction(tx, hash)
+		if err != nil {
+			return err
+		}
+
+		if borTx != nil {
+			stream.WriteNil()
+			return nil
+		}
+		stream.WriteNil()
+		return fmt.Errorf("transaction %#x not found", hash)
+	}
+	engine := api.engine()
+
+	receipts, err := api.getReceipts(ctx, tx, chainConfig, block, nil)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+
+	batch := memdb.NewMemoryBatch(tx, api.dirs.Tmp)
+	defer batch.Rollback()
+
+	fmt.Println("before")
+	fmt.Println("historyV3", api.historyV3(batch))
+
+	//msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), false)
+	msg, blockCtx, txCtx, rules, ibs, reader, writer, err := api.computeTxEnvForProof(ctx, engine, block, chainConfig, api._blockReader, batch, int(txnIndex), false)
+	if err != nil {
+		stream.WriteNil()
+		fmt.Println("error1")
+		return err
+	}
+
+	fmt.Println("wtf")
+
+	// Trace the transaction and return
+	return prover.GenerateProofForTest(
+		ctx,
+		msg,
+		blockCtx,
+		txCtx,
+		ibs,
+		block.Transactions(),
+		receipts,
+		rules,
+		blockNum,
+		txnIndex,
+		stepIdx,
+		big.NewInt(0),
+		big.NewInt(0),
+		batch,
+		reader,
+		writer,
+		config,
+		chainConfig,
+		stream,
+		api.evmCallTimeout,
+	)
+}
+
+func (api *PrivateDebugAPIImpl) GenerateProofForBench(ctx context.Context, hash common.Hash, config *tracers.TraceConfig, stream *jsoniter.Stream) error {
+	tx, err := api.db.BeginRo(ctx)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	defer tx.Rollback()
+	chainConfig, err := api.chainConfig(tx)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	// Retrieve the transaction and assemble its EVM context
+	blockNum, ok, err := api.txnLookup(ctx, tx, hash)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	if !ok {
+		stream.WriteNil()
+		return nil
+	}
+
+	// check pruning to ensure we have history at this block level
+	err = api.BaseAPI.checkPruneHistory(tx, blockNum)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+
+	// Private API returns 0 if transaction is not found.
+	if blockNum == 0 && chainConfig.Bor != nil {
+		blockNumPtr, err := rawdb.ReadBorTxLookupEntry(tx, hash)
+		if err != nil {
+			stream.WriteNil()
+			return err
+		}
+		if blockNumPtr == nil {
+			stream.WriteNil()
+			return nil
+		}
+		blockNum = *blockNumPtr
+	}
+	block, err := api.blockByNumberWithSenders(ctx, tx, blockNum)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+	if block == nil {
+		stream.WriteNil()
+		return nil
+	}
+	var txnIndex uint64
+	var txn types.Transaction
+	for i, transaction := range block.Transactions() {
+		if transaction.Hash() == hash {
+			txnIndex = uint64(i)
+			txn = transaction
+			break
+		}
+	}
+	if txn == nil {
+		var borTx types.Transaction
+		borTx, err = rawdb.ReadBorTransaction(tx, hash)
+		if err != nil {
+			return err
+		}
+
+		if borTx != nil {
+			stream.WriteNil()
+			return nil
+		}
+		stream.WriteNil()
+		return fmt.Errorf("transaction %#x not found", hash)
+	}
+	engine := api.engine()
+
+	receipts, err := api.getReceipts(ctx, tx, chainConfig, block, nil)
+	if err != nil {
+		stream.WriteNil()
+		return err
+	}
+
+	batch := memdb.NewMemoryBatch(tx, api.dirs.Tmp)
+	defer batch.Rollback()
+
+	fmt.Println("before")
+	fmt.Println("historyV3", api.historyV3(batch))
+
+	//msg, blockCtx, txCtx, ibs, _, err := transactions.ComputeTxEnv(ctx, engine, block, chainConfig, api._blockReader, tx, int(txnIndex), false)
+	msg, blockCtx, txCtx, rules, ibs, reader, writer, err := api.computeTxEnvForProof(ctx, engine, block, chainConfig, api._blockReader, batch, int(txnIndex), false)
+	if err != nil {
+		stream.WriteNil()
+		fmt.Println("error1")
+		return err
+	}
+
+	fmt.Println("wtf")
+
+	// Trace the transaction and return
+	return prover.GenerateProofForBench(
+		ctx,
+		msg,
+		blockCtx,
+		txCtx,
+		ibs,
+		block.Transactions(),
+		receipts,
+		rules,
+		blockNum,
+		txnIndex,
+		big.NewInt(0),
+		big.NewInt(0),
+		batch,
+		reader,
+		writer,
+		config,
+		chainConfig,
+		stream,
+		api.evmCallTimeout,
+	)
 }
